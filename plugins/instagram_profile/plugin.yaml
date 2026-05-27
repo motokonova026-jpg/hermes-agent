@@ -1,0 +1,7 @@
+name: instagram_profile
+version: 0.1.0
+description: "View public Instagram profiles from URLs or @handles via a configured scraper backend. Designed for Willow profile research/summarization."
+author: Hermes Agent
+kind: standalone
+provides_tools:
+  - instagram_profile_view
