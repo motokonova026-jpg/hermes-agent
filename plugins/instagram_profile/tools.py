@@ -36,6 +36,18 @@ INSTAGRAM_PROFILE_VIEW_SCHEMA: Dict[str, Any] = {
                 "minimum": 0,
                 "maximum": 24,
             },
+            "download_images": {
+                "type": "boolean",
+                "description": "Download public post images/thumbnails to Willow's local cache for visual inspection. Default true.",
+                "default": True,
+            },
+            "max_images": {
+                "type": "integer",
+                "description": "Maximum number of public post images to cache locally. Default 6; capped at 24.",
+                "default": 6,
+                "minimum": 0,
+                "maximum": 24,
+            },
         },
         "required": ["profile"],
         "additionalProperties": False,
@@ -54,7 +66,12 @@ def handle_instagram_profile_view(args: dict, **kw: Any) -> str:
     try:
         # Normalize first so setup errors can still include a canonical URL.
         normalized = normalize_instagram_profile(profile)
-        result = view_instagram_profile(profile, max_posts=args.get("max_posts", 12))
+        result = view_instagram_profile(
+            profile,
+            max_posts=args.get("max_posts", 12),
+            download_images=args.get("download_images", True) is not False,
+            max_images=args.get("max_images", 6),
+        )
         return tool_result(result)
     except ValueError as exc:
         return _struct_error("instagram_profile_invalid_input", str(exc))

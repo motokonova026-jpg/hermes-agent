@@ -26,3 +26,4 @@ INSTAGRAM_PROFILE_APIFY_INPUT_JSON='...'   # JSON template; supports {{username}
 - Do not store Instagram username/passwords in Hermes.
 - If a profile is private/login-only/unavailable, return that limitation instead of pretending to see it.
 - Tool output is structured for the model to summarize; it may include profile metadata and recent public posts if the backend returns them.
+- By default the tool also downloads up to 6 public post images/thumbnails into `<HERMES_HOME>/cache/instagram_profile/<username>/` and returns `local_image_paths` for downstream vision/Discord delivery.

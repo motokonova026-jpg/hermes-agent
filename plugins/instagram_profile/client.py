@@ -8,6 +8,7 @@ not accept or store Instagram login credentials.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import time
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import httpx
+
+from hermes_constants import get_hermes_home
 
 
 DEFAULT_ACTOR_ID = "apify/instagram-profile-scraper"
@@ -130,20 +133,124 @@ def _extract_count(item: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
+def _dedupe_strings(values: Iterable[Any]) -> List[str]:
+    seen: set[str] = set()
+    result: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _post_image_urls(raw: Mapping[str, Any]) -> List[str]:
+    """Collect direct image/display URLs from a post, including carousels."""
+    urls: List[Any] = [
+        raw.get("displayUrl"),
+        raw.get("display_url"),
+        raw.get("thumbnailUrl"),
+        raw.get("thumbnail_url"),
+        raw.get("imageUrl"),
+        raw.get("image_url"),
+    ]
+    for key in ("childPosts", "child_posts", "children", "sidecarChildren", "carouselMedia", "carousel_media"):
+        for child in _as_list(raw.get(key)):
+            if isinstance(child, Mapping):
+                urls.extend(
+                    [
+                        child.get("displayUrl"),
+                        child.get("display_url"),
+                        child.get("thumbnailUrl"),
+                        child.get("thumbnail_url"),
+                        child.get("imageUrl"),
+                        child.get("image_url"),
+                    ]
+                )
+    return _dedupe_strings(urls)
+
+
 def _normalize_post(raw: Mapping[str, Any]) -> Dict[str, Any]:
     shortcode = _first_str(raw.get("shortCode"), raw.get("shortcode"), raw.get("code"))
     url = _first_str(raw.get("url"), raw.get("link"))
     if not url and shortcode:
         url = f"https://www.instagram.com/p/{shortcode}/"
+    image_urls = _post_image_urls(raw)
     return {
         "url": url,
         "caption": _first_str(raw.get("caption"), raw.get("text"), raw.get("description")),
         "timestamp": _first_str(raw.get("timestamp"), raw.get("date"), raw.get("takenAt"), raw.get("taken_at")),
         "media_type": _first_str(raw.get("type"), raw.get("mediaType"), raw.get("media_type")),
-        "thumbnail_url": _first_str(raw.get("displayUrl"), raw.get("display_url"), raw.get("thumbnailUrl"), raw.get("imageUrl")),
+        "thumbnail_url": image_urls[0] if image_urls else "",
+        "image_urls": image_urls,
+        "local_image_paths": [],
         "likes": _extract_count(raw, "likesCount", "likes_count", "likes"),
         "comments": _extract_count(raw, "commentsCount", "comments_count", "comments"),
     }
+
+
+def _extension_for_response(response: httpx.Response, url: str) -> str:
+    content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type in {"image/jpeg", "image/jpg"}:
+        return ".jpg"
+    if content_type == "image/png":
+        return ".png"
+    if content_type == "image/webp":
+        return ".webp"
+    suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
+    return suffix if suffix in {".jpg", ".jpeg", ".png", ".webp"} else ".jpg"
+
+
+def _default_cache_root() -> Path:
+    return get_hermes_home() / "cache"
+
+
+def download_post_images(
+    posts: List[Dict[str, Any]],
+    *,
+    username: str,
+    cache_root: Path | str | None = None,
+    max_images: int = 6,
+    timeout: float = 30.0,
+) -> List[Dict[str, Any]]:
+    """Download public post images and add local paths for downstream vision use."""
+    limit = _coerce_int(max_images, default=6, minimum=0, maximum=24)
+    enriched = [dict(post) for post in posts]
+    if limit <= 0:
+        return enriched
+    root = Path(cache_root) if cache_root is not None else _default_cache_root()
+    target_dir = root / "instagram_profile" / username
+    target_dir.mkdir(parents=True, exist_ok=True)
+    downloaded = 0
+    with httpx.Client(timeout=timeout) as client:
+        for post_index, post in enumerate(enriched, start=1):
+            local_paths: List[str] = []
+            failures: List[str] = []
+            for image_url in _dedupe_strings(post.get("image_urls") or [post.get("thumbnail_url")]):
+                if downloaded >= limit:
+                    break
+                try:
+                    response = client.get(image_url, follow_redirects=True)
+                    response.raise_for_status()
+                    content_type = str(response.headers.get("content-type") or "").lower()
+                    if "image/" not in content_type:
+                        failures.append(f"non_image:{image_url}")
+                        continue
+                    digest = hashlib.sha256(image_url.encode("utf-8")).hexdigest()[:16]
+                    ext = _extension_for_response(response, image_url)
+                    path = target_dir / f"{post_index:02d}_{digest}{ext}"
+                    path.write_bytes(response.content)
+                    local_paths.append(str(path))
+                    downloaded += 1
+                except Exception as exc:
+                    failures.append(f"{type(exc).__name__}:{image_url}")
+            post["local_image_paths"] = local_paths
+            if failures:
+                post["image_download_errors"] = failures[:3]
+            if downloaded >= limit:
+                break
+    return enriched
 
 
 def _collect_posts(item: Mapping[str, Any], limit: int) -> List[Dict[str, Any]]:
@@ -249,7 +356,27 @@ def fetch_with_apify(request: InstagramProfileRequest, *, max_posts: int, timeou
     return result
 
 
-def view_instagram_profile(value: str, *, max_posts: int = 12) -> Dict[str, Any]:
+def view_instagram_profile(
+    value: str,
+    *,
+    max_posts: int = 12,
+    download_images: bool = True,
+    max_images: int = 6,
+) -> Dict[str, Any]:
     request = normalize_instagram_profile(value)
     limit = _coerce_int(max_posts, default=12, minimum=0, maximum=24)
-    return fetch_with_apify(request, max_posts=limit)
+    result = fetch_with_apify(request, max_posts=limit)
+    if result.get("success") and download_images:
+        image_limit = _coerce_int(max_images, default=6, minimum=0, maximum=24)
+        posts = result.get("recent_posts")
+        if isinstance(posts, list):
+            result["recent_posts"] = download_post_images(posts, username=request.username, max_images=image_limit)
+            result["media_download_summary"] = {
+                "requested": True,
+                "max_images": image_limit,
+                "downloaded": sum(len(post.get("local_image_paths") or []) for post in result["recent_posts"] if isinstance(post, Mapping)),
+                "cache_root": str(_default_cache_root() / "instagram_profile" / request.username),
+            }
+    elif result.get("success"):
+        result["media_download_summary"] = {"requested": False}
+    return result
