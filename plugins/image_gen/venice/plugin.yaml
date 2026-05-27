@@ -1,0 +1,7 @@
+name: venice
+version: 1.0.0
+description: "Venice image generation backend via /api/v1/image/generate."
+author: Hermes Agent + Motoko
+kind: backend
+requires_env:
+  - VENICE_API_KEY
