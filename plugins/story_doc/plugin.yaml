@@ -1,6 +1,6 @@
 name: story_doc
-version: 0.4.0
-description: "Story-writer Discord workflow with Google Docs sync. PR #4 (this release): adds story_doc_revise (modes replace_body and replace_match; replace_match refused unless the anchor occurs exactly once in the doc body). story_doc_outline still deferred. Activate with `hermes plugins enable story_doc`. Requires the existing `[google]` extra (`pip install hermes-agent[google]`)."
+version: 0.4.1
+description: "Story-writer Discord workflow with Google Docs sync. Adds deterministic Chapter N headings for story starts/continuations plus story_doc_revise (modes replace_body and replace_match; replace_match refused unless the anchor occurs exactly once in the doc body). story_doc_outline still deferred. Activate with `hermes plugins enable story_doc`. Requires the existing `[google]` extra (`pip install hermes-agent[google]`)."
 author: NousResearch
 kind: standalone
 platforms:

@@ -5,6 +5,15 @@ plan (`hermes_story_writer_mvp_plan_v2.html` at the repo root). Shipped
 in vertical slices; PR #2 lands the first agent tool (`story_doc_create`)
 and the OAuth bootstrap.
 
+## What's in PR #5
+
+PR #5 adds deterministic chapter headings for Momo's story continuations:
+
+- `story_doc_create` now ensures a new story starts with `Chapter 1` if the model omits it.
+- `story_doc_append` now reads the current Google Doc, finds existing `Chapter N` headings, and ensures the appended continuation starts with the next heading (`Chapter 2`, `Chapter 3`, ...).
+- If Momo already generated a leading `Chapter N` heading, the handler preserves it and does not duplicate it.
+- Tool results include `chapter_number` and `chapter_heading_added` metadata so Momo can report what happened.
+
 ## What's in PR #4
 
 | Path | Purpose |

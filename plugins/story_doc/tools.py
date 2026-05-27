@@ -86,6 +86,36 @@ def _struct_error(error_key: str, hint: str, **extra: Any) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+_CHAPTER_HEADING_RE = re.compile(r"^\s*chapter\s+(\d+)\b", re.IGNORECASE | re.MULTILINE)
+
+
+def _next_chapter_number(existing_text: str) -> int:
+    """Return the next chapter number for a story body.
+
+    We count explicit ``Chapter N`` headings in the Google Doc body and
+    continue from the highest number found. A doc with no chapter headings
+    starts at chapter 1.
+    """
+    if not isinstance(existing_text, str):
+        return 1
+    numbers = [int(match.group(1)) for match in _CHAPTER_HEADING_RE.finditer(existing_text)]
+    return (max(numbers) + 1) if numbers else 1
+
+
+def _ensure_chapter_heading(content: str, chapter_number: int) -> tuple[str, bool]:
+    """Prefix content with ``Chapter N`` unless it already starts with one.
+
+    Returns ``(content, added)`` so handlers can include metadata in the tool
+    result. Existing model-generated chapter headings are preserved to avoid
+    duplicating headings when the model follows the prompt correctly.
+    """
+    if _CHAPTER_HEADING_RE.match(content):
+        return content, False
+    stripped = content.lstrip()
+    leading = content[: len(content) - len(stripped)]
+    return f"{leading}Chapter {chapter_number}\n\n{stripped}", True
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -100,7 +130,9 @@ STORY_DOC_CREATE_SCHEMA: Dict[str, Any] = {
         "`!story start <alias> <prompt>`, call this tool with "
         "story_key=<alias>, title=<a short title you derive from the "
         "prompt or the first sentence>, and content=<the opening draft "
-        "you generate from the prompt>. The alias is mandatory and must "
+        "you generate from the prompt>. Start the draft as Chapter 1; "
+        "the handler also enforces a Chapter 1 heading if it is missing. "
+        "The alias is mandatory and must "
         "match [a-z0-9][a-z0-9_-]{0,63}.\n\n"
         "If the alias already exists, this tool errors -- use "
         "`story_doc_append` (PR #3) or `story_doc_revise` (PR #3) to "
@@ -133,8 +165,10 @@ STORY_DOC_CREATE_SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "Initial body text for the doc. This is the first "
-                    "draft you generated from the user's prompt. Plain "
-                    "text only at v1 (Markdown is NOT rendered)."
+                    "draft you generated from the user's prompt. Start "
+                    "with a plain-text 'Chapter 1' heading; the handler "
+                    "adds it if you omit it. Plain text only at v1 "
+                    "(Markdown is NOT rendered)."
                 ),
             },
         },
@@ -212,6 +246,7 @@ def handle_story_doc_create(args: dict, **_kwargs) -> str:
             "invalid_content",
             f"content must be a string, got {type(content).__name__}",
         )
+    content, chapter_heading_added = _ensure_chapter_heading(content, 1)
 
     # 2. Auth check (returns structured-error JSON when not ready).
     if (auth_err := _auth_check()) is not None:
@@ -283,6 +318,8 @@ def handle_story_doc_create(args: dict, **_kwargs) -> str:
         "word_count": _word_count(content),
         "characters_inserted": inserted,
         "revision_id": revision_id,
+        "chapter_number": 1,
+        "chapter_heading_added": chapter_heading_added,
     })
 
 
@@ -415,8 +452,12 @@ STORY_DOC_APPEND_SCHEMA: Dict[str, Any] = {
         "Trigger: when the user types `!story continue <alias> "
         "<instruction>`, call story_doc_read first to load the current "
         "text, generate the next chunk in your reply that respects the "
-        "instruction, then call story_doc_append with story_key=<alias> "
-        "and content=<your generated chunk>.\n\n"
+        "instruction, start that new chunk with the next plain-text "
+        "chapter heading (`Chapter 2`, `Chapter 3`, ...), then call "
+        "story_doc_append with story_key=<alias> and content=<your "
+        "generated chunk>. The handler reads the current Google Doc and "
+        "adds the next Chapter N heading if you omit it, so every "
+        "continuation becomes a new chapter.\n\n"
         "Updates the local word_count and last_revision_id in the alias "
         "store. Errors include `story_key_not_found` plus the shared "
         "auth-error contract."
@@ -432,7 +473,8 @@ STORY_DOC_APPEND_SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "Text to append. Plain text only at v1 (Markdown is "
-                    "NOT rendered)."
+                    "NOT rendered). Start with the next 'Chapter N' "
+                    "heading; the handler adds it if omitted."
                 ),
             },
             "separator": {
@@ -491,9 +533,21 @@ def handle_story_doc_append(args: dict, **_kwargs) -> str:
         return lookup_err
 
     doc_id = row["doc_id"]
-    payload = (separator + content) if separator else content
 
     client = GoogleDocsClient()
+    try:
+        existing_text = client.read_doc_text(doc_id)
+    except GoogleDocsError as exc:
+        return _struct_error(
+            "google_docs_error",
+            str(exc),
+            status_code=exc.status_code,
+        )
+
+    chapter_number = _next_chapter_number(existing_text)
+    content, chapter_heading_added = _ensure_chapter_heading(content, chapter_number)
+    payload = (separator + content) if separator else content
+
     try:
         chars_inserted = client.insert_text_at_end(doc_id, payload)
     except GoogleDocsError as exc:
@@ -504,7 +558,7 @@ def handle_story_doc_append(args: dict, **_kwargs) -> str:
         )
     revision_id = client.get_latest_revision_id(doc_id)
 
-    # Persist the post-append metadata: bump word count by the *content*
+    # Persist the post-append metadata: bump word count by the final *content*
     # word count (separators aren't words), refresh revision_id, stamp
     # updated_at via upsert.
     appended_word_count = _word_count(content)
@@ -545,6 +599,8 @@ def handle_story_doc_append(args: dict, **_kwargs) -> str:
         "total_word_count": new_total,
         "revision_id": revision_id,
         "separator_used": separator,
+        "chapter_number": chapter_number,
+        "chapter_heading_added": chapter_heading_added,
     })
 
 
